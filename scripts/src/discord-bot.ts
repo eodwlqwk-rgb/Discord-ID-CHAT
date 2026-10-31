@@ -407,7 +407,7 @@ async function addReactionRole(
 
 function nicknamePanelPayload() {
   const embed = new EmbedBuilder()
-    .setColor(0xf1c40f)
+    .setTitle("✎ 닉네임 변경 ✎")
     .setDescription("치지직 닉네임을 입력해 주세요.");
   const button = new ButtonBuilder()
     .setCustomId("discord-nickname:open")
@@ -416,7 +416,6 @@ function nicknamePanelPayload() {
   const row =
     new ActionRowBuilder<ButtonBuilder>().addComponents(button);
   return {
-    content: "```ansi\n\u001b[33m✎ 닉네임 변경 ✎\u001b[0m\n```",
     embeds: [embed],
     components: [row],
   };
