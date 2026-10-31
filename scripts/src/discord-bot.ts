@@ -23,16 +23,20 @@ import {
   type Role,
   type TextChannel,
 } from "discord.js";
-import {
-  discordNicknamePanels,
-  discordReactionRoleMappings,
-  discordRelayChannels,
-  db,
-  pool,
-} from "@workspace/db";
-import { and, eq } from "drizzle-orm";
+import { config as loadEnvironment } from "dotenv";
+import { fileURLToPath } from "node:url";
 import pino from "pino";
 import { commandBuilders } from "./discord-bot-commands";
+import {
+  flushBotStore,
+  loadBotStore,
+  readBotStore,
+  updateBotStore,
+} from "./discord-bot-store";
+
+loadEnvironment({
+  path: fileURLToPath(new URL("../../.env", import.meta.url)),
+});
 
 const logger = pino({
   name: "discord-bot",
@@ -42,7 +46,7 @@ const logger = pino({
 const botToken = process.env.DISCORD_BOT_TOKEN;
 if (!botToken) {
   throw new Error(
-    "DISCORD_BOT_TOKEN is required. Add it in Replit Secrets before starting the bot.",
+    "DISCORD_BOT_TOKEN is required. Add it to the project-root .env file.",
   );
 }
 
@@ -160,41 +164,46 @@ async function configureRelayChannel(
     return;
   }
 
-  try {
-    await db
-      .insert(discordRelayChannels)
-      .values({
-        channelId: interaction.channelId,
-        guildId: interaction.guildId,
-        tag,
-        channelType,
-        updatedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: discordRelayChannels.channelId,
-        set: {
-          guildId: interaction.guildId,
-          tag,
-          channelType,
-          updatedAt: new Date(),
-        },
-      });
+  const saved = await updateBotStore((draft) => {
+    const duplicateAdmin =
+      channelType === "admin" &&
+      draft.relayChannels.some(
+        (record) =>
+          record.guildId === interaction.guildId &&
+          record.tag === tag &&
+          record.channelType === "admin" &&
+          record.channelId !== interaction.channelId,
+      );
+    if (duplicateAdmin) return false;
 
-    const kind = channelType === "input" ? "입력 채널" : "관리자 수신 채널";
+    const record = {
+      channelId: interaction.channelId!,
+      guildId: interaction.guildId!,
+      tag,
+      channelType,
+      updatedAt: new Date().toISOString(),
+    };
+    const existingIndex = draft.relayChannels.findIndex(
+      (item) => item.channelId === interaction.channelId,
+    );
+    if (existingIndex === -1) draft.relayChannels.push(record);
+    else draft.relayChannels[existingIndex] = record;
+    return true;
+  });
+
+  if (!saved) {
     await replyPrivately(
       interaction,
-      `현재 채널을 ${kind}로 등록했습니다. 태그: \`${tag}\``,
+      "같은 태그의 관리자 수신 채널이 이미 등록되어 있습니다.",
     );
-  } catch (error) {
-    if (discordErrorCode(error) === "23505") {
-      await replyPrivately(
-        interaction,
-        "같은 태그의 관리자 수신 채널이 이미 등록되어 있습니다.",
-      );
-      return;
-    }
-    throw error;
+    return;
   }
+
+  const kind = channelType === "input" ? "입력 채널" : "관리자 수신 채널";
+  await replyPrivately(
+    interaction,
+    `현재 채널을 ${kind}로 등록했습니다. 태그: \`${tag}\``,
+  );
 }
 
 async function changeOrDeleteTag(
@@ -205,17 +214,11 @@ async function changeOrDeleteTag(
     return;
   }
 
-  const current = await db
-    .select()
-    .from(discordRelayChannels)
-    .where(
-      and(
-        eq(discordRelayChannels.guildId, interaction.guildId),
-        eq(discordRelayChannels.channelId, interaction.channelId),
-      ),
-    )
-    .limit(1);
-  const configuration = current[0];
+  const configuration = (await readBotStore()).relayChannels.find(
+    (record) =>
+      record.guildId === interaction.guildId &&
+      record.channelId === interaction.channelId,
+  );
   if (!configuration) {
     await replyPrivately(
       interaction,
@@ -225,14 +228,13 @@ async function changeOrDeleteTag(
   }
 
   if (interaction.options.getSubcommand() === "삭제") {
-    await db
-      .delete(discordRelayChannels)
-      .where(
-        and(
-          eq(discordRelayChannels.guildId, interaction.guildId),
-          eq(discordRelayChannels.channelId, interaction.channelId),
-        ),
+    await updateBotStore((draft) => {
+      draft.relayChannels = draft.relayChannels.filter(
+        (record) =>
+          record.guildId !== interaction.guildId ||
+          record.channelId !== interaction.channelId,
       );
+    });
     await replyPrivately(
       interaction,
       "현재 채널의 전달 설정을 삭제했습니다. 다른 채널 설정은 유지됩니다.",
@@ -246,30 +248,40 @@ async function changeOrDeleteTag(
     return;
   }
 
-  try {
-    await db
-      .update(discordRelayChannels)
-      .set({ tag: newTag, updatedAt: new Date() })
-      .where(
-        and(
-          eq(discordRelayChannels.guildId, interaction.guildId),
-          eq(discordRelayChannels.channelId, interaction.channelId),
-        ),
+  const changed = await updateBotStore((draft) => {
+    const record = draft.relayChannels.find(
+      (item) =>
+        item.guildId === interaction.guildId &&
+        item.channelId === interaction.channelId,
+    );
+    if (!record) return false;
+
+    const duplicateAdmin =
+      record.channelType === "admin" &&
+      draft.relayChannels.some(
+        (item) =>
+          item.guildId === interaction.guildId &&
+          item.tag === newTag &&
+          item.channelType === "admin" &&
+          item.channelId !== interaction.channelId,
       );
+    if (duplicateAdmin) return false;
+
+    record.tag = newTag;
+    record.updatedAt = new Date().toISOString();
+    return true;
+  });
+  if (!changed) {
     await replyPrivately(
       interaction,
-      `현재 채널의 태그를 \`${newTag}\`(으)로 변경했습니다.`,
+      "같은 태그의 관리자 수신 채널이 이미 등록되어 있습니다.",
     );
-  } catch (error) {
-    if (discordErrorCode(error) === "23505") {
-      await replyPrivately(
-        interaction,
-        "같은 태그의 관리자 수신 채널이 이미 등록되어 있습니다.",
-      );
-      return;
-    }
-    throw error;
+    return;
   }
+  await replyPrivately(
+    interaction,
+    `현재 채널의 태그를 \`${newTag}\`(으)로 변경했습니다.`,
+  );
 }
 
 function emojiKey(reaction: MessageReaction): string | null {
@@ -374,30 +386,25 @@ async function addReactionRole(
     return;
   }
 
-  await db
-    .insert(discordReactionRoleMappings)
-    .values({
+  await updateBotStore((draft) => {
+    const record = {
       guildId: guild.id,
       messageId: targetMessage.id,
       channelId: targetMessage.channelId,
       emojiKey: key,
       emojiDisplay,
       roleId: selectedRole.id,
-      updatedAt: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: [
-        discordReactionRoleMappings.guildId,
-        discordReactionRoleMappings.messageId,
-        discordReactionRoleMappings.emojiKey,
-      ],
-      set: {
-        channelId: targetMessage.channelId,
-        emojiDisplay,
-        roleId: selectedRole.id,
-        updatedAt: new Date(),
-      },
-    });
+      updatedAt: new Date().toISOString(),
+    };
+    const existingIndex = draft.reactionRoleMappings.findIndex(
+      (item) =>
+        item.guildId === guild.id &&
+        item.messageId === targetMessage.id &&
+        item.emojiKey === key,
+    );
+    if (existingIndex === -1) draft.reactionRoleMappings.push(record);
+    else draft.reactionRoleMappings[existingIndex] = record;
+  });
 
   await replyPrivately(
     interaction,
@@ -421,8 +428,43 @@ function nicknamePanelPayload() {
   };
 }
 
+function isNicknamePanelMessage(message: Message): boolean {
+  return (
+    message.author.id === client.user?.id &&
+    message.components.some(
+      (row) =>
+        "components" in row &&
+        row.components.some(
+          (component) =>
+            "customId" in component &&
+            component.customId === "discord-nickname:open",
+        ),
+    )
+  );
+}
+
+async function saveNicknamePanel(
+  guildId: string,
+  channelId: string,
+  messageId: string,
+): Promise<void> {
+  await updateBotStore((draft) => {
+    const panel = {
+      guildId,
+      channelId,
+      messageId,
+      updatedAt: new Date().toISOString(),
+    };
+    const existingIndex = draft.nicknamePanels.findIndex(
+      (item) => item.channelId === channelId,
+    );
+    if (existingIndex === -1) draft.nicknamePanels.push(panel);
+    else draft.nicknamePanels[existingIndex] = panel;
+  });
+}
+
 async function refreshNicknamePanels(): Promise<void> {
-  const panels = await db.select().from(discordNicknamePanels);
+  const panels = (await readBotStore()).nicknamePanels;
   for (const panel of panels) {
     const guild = client.guilds.cache.get(panel.guildId);
     if (!guild) continue;
@@ -467,31 +509,19 @@ async function publishNicknamePanel(
     return;
   }
 
-  const existingRows = await db
-    .select()
-    .from(discordNicknamePanels)
-    .where(
-      and(
-        eq(discordNicknamePanels.guildId, interaction.guildId),
-        eq(discordNicknamePanels.channelId, interaction.channelId),
-      ),
-    )
-    .limit(1);
+  const savedPanel = (await readBotStore()).nicknamePanels.find(
+    (panel) =>
+      panel.guildId === interaction.guildId &&
+      panel.channelId === interaction.channelId,
+  );
 
-  const existingPanel = existingRows[0];
-  if (existingPanel) {
+  let existingMessage: Message | undefined;
+  if (savedPanel) {
     try {
-      const existingMessage = await interaction.channel.messages.fetch(
-        existingPanel.messageId,
+      const fetched = await interaction.channel.messages.fetch(
+        savedPanel.messageId,
       );
-      if (existingMessage.author.id === client.user?.id) {
-        await existingMessage.edit(nicknamePanelPayload());
-        await replyPrivately(
-          interaction,
-          "기존 별명 변경 안내 메시지를 갱신했습니다.",
-        );
-        return;
-      }
+      if (isNicknamePanelMessage(fetched)) existingMessage = fetched;
     } catch (error) {
       const code = discordErrorCode(error);
       if (code !== 10008 && code !== "10008") {
@@ -504,26 +534,44 @@ async function publishNicknamePanel(
     }
   }
 
+  if (!existingMessage) {
+    try {
+      const recentMessages = await interaction.channel.messages.fetch({
+        limit: 100,
+      });
+      existingMessage = recentMessages.find(isNicknamePanelMessage);
+    } catch {
+      await replyPrivately(
+        interaction,
+        "기존 안내 메시지를 확인하지 못했습니다. 봇의 메시지 기록 읽기 권한을 확인해 주세요.",
+      );
+      return;
+    }
+  }
+
+  if (existingMessage) {
+    await existingMessage.edit(nicknamePanelPayload());
+    await saveNicknamePanel(
+      interaction.guildId,
+      interaction.channelId,
+      existingMessage.id,
+    );
+    await replyPrivately(
+      interaction,
+      "기존 별명 변경 안내 메시지를 갱신했습니다.",
+    );
+    return;
+  }
+
   const createdMessage = await interaction.channel.send(
     nicknamePanelPayload(),
   );
   try {
-    await db
-      .insert(discordNicknamePanels)
-      .values({
-        guildId: interaction.guildId,
-        channelId: interaction.channelId,
-        messageId: createdMessage.id,
-        updatedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: discordNicknamePanels.channelId,
-        set: {
-          guildId: interaction.guildId,
-          messageId: createdMessage.id,
-          updatedAt: new Date(),
-        },
-      });
+    await saveNicknamePanel(
+      interaction.guildId,
+      interaction.channelId,
+      createdMessage.id,
+    );
   } catch (error) {
     await createdMessage.delete().catch(() => undefined);
     throw error;
@@ -588,32 +636,21 @@ async function forwardMessage(message: Message): Promise<void> {
     return;
   }
 
-  const sourceRows = await db
-    .select()
-    .from(discordRelayChannels)
-    .where(
-      and(
-        eq(discordRelayChannels.guildId, message.guild.id),
-        eq(discordRelayChannels.channelId, message.channelId),
-        eq(discordRelayChannels.channelType, "input"),
-      ),
-    )
-    .limit(1);
-  const source = sourceRows[0];
+  const relayChannels = (await readBotStore()).relayChannels;
+  const source = relayChannels.find(
+    (record) =>
+      record.guildId === message.guild!.id &&
+      record.channelId === message.channelId &&
+      record.channelType === "input",
+  );
   if (!source) return;
 
-  const destinationRows = await db
-    .select()
-    .from(discordRelayChannels)
-    .where(
-      and(
-        eq(discordRelayChannels.guildId, message.guild.id),
-        eq(discordRelayChannels.tag, source.tag),
-        eq(discordRelayChannels.channelType, "admin"),
-      ),
-    )
-    .limit(1);
-  const destination = destinationRows[0];
+  const destination = relayChannels.find(
+    (record) =>
+      record.guildId === message.guild!.id &&
+      record.tag === source.tag &&
+      record.channelType === "admin",
+  );
   if (!destination) return;
 
   const botMember =
@@ -720,18 +757,12 @@ async function handleReactionRole(
   const key = emojiKey(hydratedReaction);
   if (!guild || !key) return;
 
-  const mappings = await db
-    .select()
-    .from(discordReactionRoleMappings)
-    .where(
-      and(
-        eq(discordReactionRoleMappings.guildId, guild.id),
-        eq(discordReactionRoleMappings.messageId, message.id),
-        eq(discordReactionRoleMappings.emojiKey, key),
-      ),
-    )
-    .limit(1);
-  const mapping = mappings[0];
+  const mapping = (await readBotStore()).reactionRoleMappings.find(
+    (record) =>
+      record.guildId === guild.id &&
+      record.messageId === message.id &&
+      record.emojiKey === key,
+  );
   if (!mapping) return;
 
   try {
@@ -808,25 +839,6 @@ async function handleNicknameButton(
     return;
   }
 
-  const panels = await db
-    .select()
-    .from(discordNicknamePanels)
-    .where(
-      and(
-        eq(discordNicknamePanels.guildId, interaction.guildId),
-        eq(discordNicknamePanels.channelId, interaction.channelId),
-        eq(discordNicknamePanels.messageId, panelMessage.id),
-      ),
-    )
-    .limit(1);
-  if (!panels[0]) {
-    await replyPrivately(
-      interaction,
-      "이 안내 메시지는 더 이상 활성화되어 있지 않습니다.",
-    );
-    return;
-  }
-
   await interaction.showModal(createNicknameModal(panelMessage.id));
 }
 
@@ -842,25 +854,6 @@ async function handleNicknameSubmit(
     !messageId
   ) {
     await replyPrivately(interaction, "서버에서만 닉네임을 변경할 수 있습니다.");
-    return;
-  }
-
-  const panels = await db
-    .select()
-    .from(discordNicknamePanels)
-    .where(
-      and(
-        eq(discordNicknamePanels.guildId, interaction.guildId),
-        eq(discordNicknamePanels.channelId, interaction.channelId),
-        eq(discordNicknamePanels.messageId, messageId),
-      ),
-    )
-    .limit(1);
-  if (!panels[0]) {
-    await replyPrivately(
-      interaction,
-      "이 안내 메시지는 더 이상 활성화되어 있지 않습니다.",
-    );
     return;
   }
 
@@ -1032,7 +1025,7 @@ client.on(Events.Error, (error) => {
 async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, "Stopping Discord bot");
   client.destroy();
-  await pool.end();
+  await flushBotStore();
 }
 
 process.once("SIGINT", () => {
@@ -1042,10 +1035,16 @@ process.once("SIGTERM", () => {
   void shutdown("SIGTERM");
 });
 
-client.login(botToken).catch((error: unknown) => {
+async function startBot(): Promise<void> {
+  await loadBotStore();
+  logger.info("Loaded local Discord bot settings");
+  await client.login(botToken);
+}
+
+void startBot().catch((error: unknown) => {
   logger.error(
     { code: discordErrorCode(error) },
-    "Could not connect to Discord. Check the bot token and enabled gateway intents.",
+    "Could not start Discord bot. Check the local data file, token, and enabled gateway intents.",
   );
   process.exitCode = 1;
 });

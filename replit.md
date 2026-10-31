@@ -10,14 +10,15 @@ Discord 서버에서 메시지 전달, 이모지 반응 역할 지급, 셀프 �
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required secrets: `DISCORD_BOT_TOKEN`
-- Required env: `DATABASE_URL` — PostgreSQL connection string
+- The Discord bot only needs `DISCORD_BOT_TOKEN`, read from the repository-root `.env` file or the process environment.
+- The bot stores relay, reaction-role, and nickname-panel settings in `.discord-bot-data/store.json`; no database is needed to run the bot.
+- `DATABASE_URL` is still used by the separate API server, not by the Discord bot.
 
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
 - API: Express 5
-- DB: PostgreSQL + Drizzle ORM
+- API DB: PostgreSQL + Drizzle ORM
 - Validation: Zod (`zod/v4`), `drizzle-zod`
 - API codegen: Orval (from OpenAPI spec)
 - Build: esbuild (CJS bundle)
@@ -36,6 +37,7 @@ _Populate as you build — non-obvious choices a reader couldn't infer from the 
 - Messages are relayed to the matching administrator channel and deleted from the source only after delivery succeeds.
 - `/역할` adds a persistent reaction-to-role mapping; removing a reaction never removes the role.
 - `/별명` posts or refreshes a persistent panel for members to change only their own server nickname.
+- Bot configuration persists locally in `.discord-bot-data/store.json`; back up this file when moving the bot to another server.
 
 ## Discord setup
 

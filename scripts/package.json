@@ -13,9 +13,8 @@
     "tsx": "catalog:"
   },
   "dependencies": {
-    "@workspace/db": "workspace:*",
     "discord.js": "^14.27.0",
-    "drizzle-orm": "catalog:",
+    "dotenv": "^18.0.9",
     "pino": "^9.14.0"
   }
 }

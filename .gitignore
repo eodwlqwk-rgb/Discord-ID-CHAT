@@ -17,6 +17,12 @@ out-tsc
 # dependencies
 node_modules
 
+# Local credentials and Discord bot data
+.env
+.env.*
+!.env.example
+/.discord-bot-data/
+
 # IDEs and editors
 /.idea
 .project
