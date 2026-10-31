@@ -124,19 +124,12 @@ async function replyPrivately(
 
 async function registerCommandsForGuild(guild: Guild): Promise<void> {
   try {
-    const existingCommands = await guild.commands.fetch();
-    for (const builder of commandBuilders) {
-      const data = builder.toJSON();
-      const existing = existingCommands.find(
-        (command) => command.name === data.name,
-      );
-      if (existing) {
-        await guild.commands.edit(existing.id, data);
-      } else {
-        await guild.commands.create(data);
-      }
-    }
-    logger.info({ guildId: guild.id }, "Registered bot slash commands");
+    const commands = commandBuilders.map((builder) => builder.toJSON());
+    await guild.commands.set(commands);
+    logger.info(
+      { guildId: guild.id, commandCount: commands.length },
+      "Replaced server slash commands with the current bot commands",
+    );
   } catch (error) {
     logger.error(
       { guildId: guild.id, code: discordErrorCode(error) },
@@ -905,7 +898,22 @@ async function handleNicknameSubmit(
 }
 
 client.once(Events.ClientReady, async (readyClient) => {
-  logger.info({ botUserId: readyClient.user.id }, "Discord bot is connected");
+  logger.info(
+    {
+      botUserId: readyClient.user.id,
+      guildCount: readyClient.guilds.cache.size,
+    },
+    "Discord bot is connected",
+  );
+  try {
+    await readyClient.application.commands.set([]);
+    logger.info("Cleared previously registered global slash commands");
+  } catch (error) {
+    logger.error(
+      { code: discordErrorCode(error) },
+      "Could not clear previously registered global slash commands",
+    );
+  }
   for (const guild of readyClient.guilds.cache.values()) {
     await registerCommandsForGuild(guild);
   }
