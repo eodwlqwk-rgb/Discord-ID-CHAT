@@ -407,7 +407,7 @@ async function addReactionRole(
 
 function nicknamePanelPayload() {
   const embed = new EmbedBuilder()
-    .setTitle("✎ 닉네임 변경 ✎")
+    .setColor(0xf1c40f)
     .setDescription("치지직 닉네임을 입력해 주세요.");
   const button = new ButtonBuilder()
     .setCustomId("discord-nickname:open")
@@ -415,7 +415,41 @@ function nicknamePanelPayload() {
     .setStyle(ButtonStyle.Primary);
   const row =
     new ActionRowBuilder<ButtonBuilder>().addComponents(button);
-  return { embeds: [embed], components: [row] };
+  return {
+    content: "```ansi\n\u001b[33m✎ 닉네임 변경 ✎\u001b[0m\n```",
+    embeds: [embed],
+    components: [row],
+  };
+}
+
+async function refreshNicknamePanels(): Promise<void> {
+  const panels = await db.select().from(discordNicknamePanels);
+  for (const panel of panels) {
+    const guild = client.guilds.cache.get(panel.guildId);
+    if (!guild) continue;
+
+    try {
+      const channel = await guild.channels.fetch(panel.channelId);
+      if (!channel || !isStandardTextChannel(channel)) continue;
+      const message = await channel.messages.fetch(panel.messageId);
+      if (message.author.id !== client.user?.id) continue;
+      await message.edit(nicknamePanelPayload());
+      logger.info(
+        { guildId: guild.id, channelId: channel.id, messageId: message.id },
+        "Updated nickname panel appearance",
+      );
+    } catch (error) {
+      logger.warn(
+        {
+          guildId: guild.id,
+          channelId: panel.channelId,
+          messageId: panel.messageId,
+          code: discordErrorCode(error),
+        },
+        "Could not update a saved nickname panel",
+      );
+    }
+  }
 }
 
 async function publishNicknamePanel(
@@ -917,6 +951,12 @@ client.once(Events.ClientReady, async (readyClient) => {
   for (const guild of readyClient.guilds.cache.values()) {
     await registerCommandsForGuild(guild);
   }
+  await refreshNicknamePanels().catch((error: unknown) => {
+    logger.error(
+      { code: discordErrorCode(error) },
+      "Could not update saved nickname panels",
+    );
+  });
 });
 
 client.on(Events.GuildCreate, (guild) => {
